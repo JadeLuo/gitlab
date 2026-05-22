@@ -16,6 +16,16 @@
 - 防死循环：`[AI-Fix]` 标记检测
 - 熔断机制：`MAX_RETRY_COUNT` 控制最大重试次数
 
+## 下载
+
+离线部署包及 Docker 镜像可从 [GitHub Release v1.0.0](https://github.com/JadeLuo/gitlab/releases/tag/v1.0.0) 下载：
+
+| 文件 | 说明 |
+|------|------|
+| [ai-cicd-offline-package.tar.gz](https://github.com/JadeLuo/gitlab/releases/download/v1.0.0/ai-cicd-offline-package.tar.gz) | 完整离线部署包（含镜像、部署脚本、项目文件） |
+| [gitlab-runner-latest.tar](https://github.com/JadeLuo/gitlab/releases/download/v1.0.0/gitlab-runner-latest.tar) | GitLab Runner Docker 镜像 |
+| [python-3.11-slim.tar](https://github.com/JadeLuo/gitlab/releases/download/v1.0.0/python-3.11-slim.tar) | Python 3.11 Slim Docker 镜像 |
+
 ## 环境变量配置
 
 在 GitLab **Settings -> CI/CD -> Variables** 中配置：
@@ -27,7 +37,3 @@
 | `AI_MODEL_NAME` | AI 模型名称 | `llm` |
 | `GITLAB_ACCESS_TOKEN` | GitLab 访问令牌 | `glpat-xxx` |
 | `MAX_RETRY_COUNT` | AI 修复最大重试次数 | `3` |
-# Updated 2026年 05月 21日 星期四 22:37:21 CST
-# Retry 2026年 05月 21日 星期四 22:38:45 CST
-# Fix 2026年 05月 21日 星期四 22:39:57 CST
-# CloneURL 2026年 05月 21日 星期四 22:41:07 CST
