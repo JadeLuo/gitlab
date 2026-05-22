@@ -1,0 +1,63 @@
+stages:
+  - build
+  - review
+  - self-heal
+
+variables:
+  # AI 模型配置（通过 CI/CD Variables 注入敏感值）
+  AI_API_KEY: "${AI_API_KEY}"
+  AI_API_URL: "${AI_API_URL}"
+  AI_MODEL_NAME: "${AI_MODEL_NAME}"
+  GITLAB_ACCESS_TOKEN: "${GITLAB_ACCESS_TOKEN}"
+  MAX_RETRY_COUNT: "${MAX_RETRY_COUNT}"
+  GITLAB_URL: "http://localhost:8899"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# ============ 构建阶段 ============
+build:
+  stage: build
+  tags:
+    - shell
+  script:
+    - echo "执行构建流程..."
+    - pip3 install --break-system-packages -r requirements.txt 2>&1 | tee build_output.log
+    - python3 -c "import requests; print('依赖检查通过')" 2>&1 | tee -a build_output.log
+    - echo "构建完成"
+  artifacts:
+    paths:
+      - build_output.log
+    expire_in: 1 hour
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ============ AI 代码审查 ============
+ai-code-review:
+  stage: review
+  tags:
+    - shell
+  needs: []
+  script:
+    - pip3 install --break-system-packages requests
+    - python3 ai_review.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  allow_failure: true
+
+# ============ AI 自愈构建 ============
+ai-self-heal:
+  stage: self-heal
+  tags:
+    - shell
+  needs:
+    - build
+  script:
+    - pip3 install --break-system-packages requests
+    - export BUILD_LOG_FILE="build_output.log"
+    - python3 auto_fix.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: on_failure
+    - if: $CI_COMMIT_BRANCH
+      when: on_failure
+  allow_failure: true
