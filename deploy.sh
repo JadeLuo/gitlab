@@ -6,6 +6,15 @@
 
 set -e
 
+# 使用 safe_exit 代替 exit，避免 source 执行时断开 SSH 会话
+safe_exit() {
+    if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+        exit "$1"
+    else
+        return "$1"
+    fi
+}
+
 # ==================== 配置区域 ====================
 # 请根据实际环境修改以下变量
 GITLAB_URL="${GITLAB_URL:-http://your-gitlab:80}"
@@ -65,7 +74,7 @@ PROJECT_ID=$(echo "$PROJECT_RESULT" | python3 -c "import sys,json; print(json.lo
 if [ "$PROJECT_ID" = "ERROR" ] || [ -z "$PROJECT_ID" ]; then
     echo "  [ERROR] 项目创建失败，请检查 GITLAB_URL 和 GITLAB_TOKEN"
     echo "  响应: $PROJECT_RESULT"
-    exit 1
+    safe_exit 1
 fi
 echo "  项目创建成功! ID: $PROJECT_ID"
 
@@ -132,7 +141,7 @@ RUNNERS_TOKEN=$(curl -s "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}" \
 
 if [ -z "$RUNNERS_TOKEN" ]; then
     echo "  [ERROR] 无法获取 Runner 注册 Token"
-    exit 1
+    safe_exit 1
 fi
 echo "  Runner 注册 Token: ${RUNNERS_TOKEN:0:10}..."
 
@@ -148,7 +157,7 @@ RUNNER_TOKEN=$(echo "$RUNNER_RESULT" | python3 -c "import sys,json; print(json.l
 if [ "$RUNNER_TOKEN" = "ERROR" ] || [ -z "$RUNNER_TOKEN" ]; then
     echo "  [ERROR] Runner 注册失败"
     echo "  响应: $RUNNER_RESULT"
-    exit 1
+    safe_exit 1
 fi
 echo "  Runner 注册成功! Token: ${RUNNER_TOKEN:0:10}..."
 
@@ -158,7 +167,7 @@ if docker ps -a --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
     # 检查容器是否正在运行
     if docker ps --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
         echo "  [ERROR] gitlab-runner 容器正在运行中，请先手动停止（docker stop gitlab-runner）或使用不同名称"
-        exit 1
+        safe_exit 1
     fi
     echo "  移除已停止的旧容器..."
     docker rm gitlab-runner
@@ -174,11 +183,11 @@ echo "  Runner 容器启动完成"
 echo "  安装 Runner 容器依赖..."
 if ! docker exec gitlab-runner bash -c "apt-get update -qq && apt-get install -y -qq python3 python3-pip git curl > /dev/null 2>&1"; then
     echo "  [ERROR] Runner 容器依赖安装失败 (apt-get)"
-    exit 1
+    safe_exit 1
 fi
 if ! docker exec gitlab-runner pip3 install --break-system-packages requests; then
     echo "  [ERROR] Runner 容器依赖安装失败 (pip3 requests)"
-    exit 1
+    safe_exit 1
 fi
 
 # 配置 Runner
@@ -205,7 +214,7 @@ shutdown_timeout = 0
     MaxUploadedArchiveSize = 0
 TOML"; then
     echo "  [ERROR] Runner 配置写入失败"
-    exit 1
+    safe_exit 1
 fi
 
 # 配置 git insteadOf（处理 GitLab external_url 与实际访问地址不一致的问题）
