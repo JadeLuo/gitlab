@@ -85,11 +85,11 @@ add_var() {
 }
 
 add_var "AI_API_KEY" "$AI_API_KEY" true
-add_var "AI_API_URL" "$AI_API_URL"
+add_var "AI_API_URL" "$AI_API_URL" true
 add_var "AI_MODEL_NAME" "$AI_MODEL_NAME"
 add_var "GITLAB_ACCESS_TOKEN" "$GITLAB_TOKEN" true
 add_var "MAX_RETRY_COUNT" "$MAX_RETRY_COUNT"
-add_var "GITLAB_URL" "$GITLAB_URL"
+add_var "GITLAB_URL" "$GITLAB_URL" true
 
 # ==================== 步骤 4: 推送代码到项目 ====================
 echo ""
@@ -153,7 +153,16 @@ fi
 echo "  Runner 注册成功! Token: ${RUNNER_TOKEN:0:10}..."
 
 # 启动 Runner 容器（host 网络模式）
-docker rm -f gitlab-runner 2>/dev/null || true
+if docker ps -a --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
+    echo "  [WARN] 检测到已存在的 gitlab-runner 容器"
+    # 检查容器是否正在运行
+    if docker ps --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
+        echo "  [ERROR] gitlab-runner 容器正在运行中，请先手动停止（docker stop gitlab-runner）或使用不同名称"
+        exit 1
+    fi
+    echo "  移除已停止的旧容器..."
+    docker rm gitlab-runner
+fi
 docker run -d --name gitlab-runner --restart always \
     --network host \
     -v /srv/gitlab-runner/config:/etc/gitlab-runner \
@@ -163,12 +172,18 @@ echo "  Runner 容器启动完成"
 
 # 在 Runner 容器中安装依赖
 echo "  安装 Runner 容器依赖..."
-docker exec gitlab-runner bash -c "apt-get update -qq && apt-get install -y -qq python3 python3-pip git curl > /dev/null 2>&1"
-docker exec gitlab-runner pip3 install --break-system-packages requests
+if ! docker exec gitlab-runner bash -c "apt-get update -qq && apt-get install -y -qq python3 python3-pip git curl > /dev/null 2>&1"; then
+    echo "  [ERROR] Runner 容器依赖安装失败 (apt-get)"
+    exit 1
+fi
+if ! docker exec gitlab-runner pip3 install --break-system-packages requests; then
+    echo "  [ERROR] Runner 容器依赖安装失败 (pip3 requests)"
+    exit 1
+fi
 
 # 配置 Runner
 echo "  配置 Runner..."
-docker exec gitlab-runner bash -c "cat > /etc/gitlab-runner/config.toml << 'TOML'
+if ! docker exec gitlab-runner bash -c "cat > /etc/gitlab-runner/config.toml << 'TOML'
 concurrent = ${RUNNER_CONCURRENT}
 check_interval = 0
 shutdown_timeout = 0
@@ -188,7 +203,10 @@ shutdown_timeout = 0
   shell = \"bash\"
   [runners.cache]
     MaxUploadedArchiveSize = 0
-TOML"
+TOML"; then
+    echo "  [ERROR] Runner 配置写入失败"
+    exit 1
+fi
 
 # 配置 git insteadOf（处理 GitLab external_url 与实际访问地址不一致的问题）
 GITLAB_HOST=$(echo "$GITLAB_URL" | python3 -c "import sys; from urllib.parse import urlparse; u=urlparse(sys.stdin.read().strip()); print(u.hostname)" 2>/dev/null)
@@ -204,7 +222,9 @@ echo "  Runner 配置完成!"
 echo ""
 echo "[步骤 6/6] 验证部署..."
 
-# 验证 Runner 连接
+# 验证 Runner 连接（等待 Runner 初始化）
+echo "  等待 Runner 初始化..."
+sleep 5
 VERIFY_RESULT=$(docker exec gitlab-runner gitlab-runner verify 2>&1 || true)
 if echo "$VERIFY_RESULT" | grep -q "is alive"; then
     echo "  Runner 连接验证: 通过"
@@ -214,7 +234,6 @@ else
 fi
 
 # 检查最新 Pipeline
-sleep 3
 PIPELINES=$(curl -s "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/pipelines" \
     -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" 2>/dev/null || echo "[]")
 PIPE_COUNT=$(echo "$PIPELINES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
