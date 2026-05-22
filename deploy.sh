@@ -4,7 +4,8 @@
 # 适用场景：内网 GitLab CE 环境离线部署
 # ============================================================
 
-set -e
+# 不使用 set -e，改为手动错误处理
+# set -e 会在 source 执行时直接终止 SSH shell
 
 # 使用 safe_exit 代替 exit，避免 source 执行时断开 SSH 会话
 safe_exit() {
@@ -42,14 +43,20 @@ echo ""
 echo "[步骤 1/6] 加载 Docker 镜像..."
 
 if [ -f "$SCRIPT_DIR/images/gitlab-runner-latest.tar" ]; then
-    docker load -i "$SCRIPT_DIR/images/gitlab-runner-latest.tar"
+    if ! docker load -i "$SCRIPT_DIR/images/gitlab-runner-latest.tar"; then
+        echo "  [ERROR] gitlab-runner 镜像加载失败"
+        safe_exit 1
+    fi
     echo "  gitlab-runner 镜像加载完成"
 else
     echo "  [WARN] gitlab-runner-latest.tar 不存在，跳过"
 fi
 
 if [ -f "$SCRIPT_DIR/images/python-3.11-slim.tar" ]; then
-    docker load -i "$SCRIPT_DIR/images/python-3.11-slim.tar"
+    if ! docker load -i "$SCRIPT_DIR/images/python-3.11-slim.tar"; then
+        echo "  [ERROR] python:3.11-slim 镜像加载失败"
+        safe_exit 1
+    fi
     echo "  python:3.11-slim 镜像加载完成"
 else
     echo "  [WARN] python-3.11-slim.tar 不存在，跳过"
@@ -117,14 +124,19 @@ fi
 
 TMP_DIR=$(mktemp -d)
 cp -r "$SCRIPT_DIR/project/"* "$TMP_DIR/"
-cd "$TMP_DIR"
-git init
+cd "$TMP_DIR" || { echo "  [ERROR] 无法进入临时目录"; safe_exit 1; }
+git init || { echo "  [ERROR] git init 失败"; safe_exit 1; }
 git config user.email "deployer@local"
 git config user.name "Deployer"
 git add -A
-git commit -m "Initial commit: AI-driven CI/CD pipeline"
+git commit -m "Initial commit: AI-driven CI/CD pipeline" || { echo "  [ERROR] git commit 失败"; safe_exit 1; }
 git remote add origin "$AUTH_URL"
-git push -u origin master
+if ! git push -u origin master; then
+    echo "  [ERROR] 代码推送失败，请检查 GitLab 连接和 Token"
+    cd "$SCRIPT_DIR"
+    rm -rf "$TMP_DIR"
+    safe_exit 1
+fi
 
 echo "  代码推送完成!"
 cd "$SCRIPT_DIR"
@@ -172,10 +184,13 @@ if docker ps -a --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
     echo "  移除已停止的旧容器..."
     docker rm gitlab-runner
 fi
-docker run -d --name gitlab-runner --restart always \
+if ! docker run -d --name gitlab-runner --restart always \
     --network host \
     -v /srv/gitlab-runner/config:/etc/gitlab-runner \
-    gitlab/gitlab-runner:latest
+    gitlab/gitlab-runner:latest; then
+    echo "  [ERROR] Runner 容器启动失败"
+    safe_exit 1
+fi
 
 echo "  Runner 容器启动完成"
 
