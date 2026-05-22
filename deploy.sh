@@ -5,28 +5,40 @@
 # ============================================================
 
 # 不使用 set -e，改为手动错误处理
-# set -e 会在 source 执行时直接终止 SSH shell
-
-# 使用 safe_exit 代替 exit，避免 source 执行时断开 SSH 会话
+# 原因：set -e 会在命令失败时直接终止整个 shell，
+#       如果通过 source 执行脚本，会导致 SSH 会话断开
 safe_exit() {
     if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+        # 直接执行（bash deploy.sh）：退出子进程
         exit "$1"
     else
+        # source 执行（source deploy.sh）：仅返回，不断开 SSH
         return "$1"
     fi
 }
 
 # ==================== 配置区域 ====================
 # 请根据实际环境修改以下变量
+# 也可通过环境变量传入，例如：GITLAB_URL=http://gitlab:80 bash deploy.sh
+
+# GitLab 服务地址
 GITLAB_URL="${GITLAB_URL:-http://your-gitlab:80}"
+# GitLab 访问令牌（需要 Maintainer 权限）
 GITLAB_TOKEN="${GITLAB_TOKEN:-glpat-your-token-here}"
+# AI API 服务地址
 AI_API_URL="${AI_API_URL:-http://your-ai-api:3000/}"
+# AI API 密钥
 AI_API_KEY="${AI_API_KEY:-sk-your-api-key}"
+# AI 模型名称
 AI_MODEL_NAME="${AI_MODEL_NAME:-llm}"
+# 在 GitLab 中创建的项目名称
 PROJECT_NAME="${PROJECT_NAME:-ai-cicd-pipeline}"
+# Runner 并发执行数
 RUNNER_CONCURRENT="${RUNNER_CONCURRENT:-2}"
+# AI 自愈构建最大重试次数
 MAX_RETRY_COUNT="${MAX_RETRY_COUNT:-3}"
 
+# 获取脚本所在目录的绝对路径
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "================================================"
@@ -42,6 +54,7 @@ echo "================================================"
 echo ""
 echo "[步骤 1/6] 加载 Docker 镜像..."
 
+# 加载 gitlab-runner 镜像（离线环境中从 tar 文件导入）
 if [ -f "$SCRIPT_DIR/images/gitlab-runner-latest.tar" ]; then
     if ! docker load -i "$SCRIPT_DIR/images/gitlab-runner-latest.tar"; then
         echo "  [ERROR] gitlab-runner 镜像加载失败"
@@ -52,6 +65,7 @@ else
     echo "  [WARN] gitlab-runner-latest.tar 不存在，跳过"
 fi
 
+# 加载 python:3.11-slim 镜像（CI Job 运行时依赖）
 if [ -f "$SCRIPT_DIR/images/python-3.11-slim.tar" ]; then
     if ! docker load -i "$SCRIPT_DIR/images/python-3.11-slim.tar"; then
         echo "  [ERROR] python:3.11-slim 镜像加载失败"
@@ -66,6 +80,7 @@ fi
 echo ""
 echo "[步骤 2/6] 创建 GitLab 项目..."
 
+# 通过 GitLab REST API 创建项目
 PROJECT_RESULT=$(curl -s -X POST "${GITLAB_URL}/api/v4/projects" \
     -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
     -H "Content-Type: application/json" \
@@ -76,6 +91,7 @@ PROJECT_RESULT=$(curl -s -X POST "${GITLAB_URL}/api/v4/projects" \
         \"initialize_with_readme\": false
     }")
 
+# 从响应中提取项目 ID
 PROJECT_ID=$(echo "$PROJECT_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','ERROR'))" 2>/dev/null || echo "ERROR")
 
 if [ "$PROJECT_ID" = "ERROR" ] || [ -z "$PROJECT_ID" ]; then
@@ -89,6 +105,8 @@ echo "  项目创建成功! ID: $PROJECT_ID"
 echo ""
 echo "[步骤 3/6] 配置 CI/CD 变量..."
 
+# 向 GitLab 项目添加 CI/CD 变量的辅助函数
+# 参数：$1=变量名, $2=变量值, $3=是否遮罩（true/false，默认 false）
 add_var() {
     local key=$1 value=$2 masked=${3:-false}
     local result
@@ -96,10 +114,12 @@ add_var() {
         -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "{\"key\":\"${key}\",\"value\":\"${value}\",\"masked\":${masked},\"variable_type\":\"env_var\"}")
+    # 检查返回结果中是否包含 key 字段，判断是否创建成功
     local status=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print('OK' if 'key' in d else d.get('message','FAIL'))" 2>/dev/null || echo "FAIL")
     echo "  ${key}: ${status}"
 }
 
+# 添加 CI/CD 变量（敏感信息设置 masked=true，在流水线日志中会被遮罩显示）
 add_var "AI_API_KEY" "$AI_API_KEY" true
 add_var "AI_API_URL" "$AI_API_URL" true
 add_var "AI_MODEL_NAME" "$AI_MODEL_NAME"
@@ -111,17 +131,19 @@ add_var "GITLAB_URL" "$GITLAB_URL" true
 echo ""
 echo "[步骤 4/6] 推送项目代码..."
 
-# 从 API 获取 clone URL
+# 从步骤 2 的 API 响应中获取项目的 HTTP clone 地址
 CLONE_URL=$(echo "$PROJECT_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('http_url_to_repo',''))" 2>/dev/null)
 
-# 在 URL 中注入 token
+# 在 URL 中注入 OAuth2 Token 用于认证推送
 if echo "$CLONE_URL" | grep -q "://"; then
     AUTH_URL=$(echo "$CLONE_URL" | sed "s|://|://oauth2:${GITLAB_TOKEN}@|")
 else
+    # 如果无法获取 clone URL，则手动拼接
     AUTH_URL="${GITLAB_URL}/root/${PROJECT_NAME}.git"
     AUTH_URL=$(echo "$AUTH_URL" | sed "s|://|://oauth2:${GITLAB_TOKEN}@|")
 fi
 
+# 将 project/ 目录的代码推送到 GitLab
 TMP_DIR=$(mktemp -d)
 cp -r "$SCRIPT_DIR/project/"* "$TMP_DIR/"
 cd "$TMP_DIR" || { echo "  [ERROR] 无法进入临时目录"; safe_exit 1; }
@@ -139,6 +161,7 @@ if ! git push -u origin master; then
 fi
 
 echo "  代码推送完成!"
+# 返回脚本目录并清理临时目录
 cd "$SCRIPT_DIR"
 rm -rf "$TMP_DIR"
 
@@ -146,7 +169,7 @@ rm -rf "$TMP_DIR"
 echo ""
 echo "[步骤 5/6] 部署 GitLab Runner..."
 
-# 获取 Runner 注册 token
+# 通过 GitLab API 获取项目的 Runner 注册 Token
 RUNNERS_TOKEN=$(curl -s "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}" \
     -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" | \
     python3 -c "import sys,json; print(json.load(sys.stdin).get('runners_token',''))" 2>/dev/null)
@@ -157,13 +180,16 @@ if [ -z "$RUNNERS_TOKEN" ]; then
 fi
 echo "  Runner 注册 Token: ${RUNNERS_TOKEN:0:10}..."
 
-# 注册 Runner（通过 API）
+# 通过 GitLab API 注册 Runner
+# 标签：shell, python — 用于 CI Job 的 tag 匹配
+# run_untagged=true — 也可执行未打标签的 Job
 RUNNER_RESULT=$(curl -s -X POST "${GITLAB_URL}/api/v4/runners" \
     -d "token=${RUNNERS_TOKEN}" \
     -d "description=shell-runner" \
     -d "tag_list=shell,python" \
     -d "run_untagged=true")
 
+# 从响应中提取 Runner 认证 Token（用于后续 config.toml 配置）
 RUNNER_TOKEN=$(echo "$RUNNER_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','ERROR'))" 2>/dev/null || echo "ERROR")
 
 if [ "$RUNNER_TOKEN" = "ERROR" ] || [ -z "$RUNNER_TOKEN" ]; then
@@ -173,7 +199,8 @@ if [ "$RUNNER_TOKEN" = "ERROR" ] || [ -z "$RUNNER_TOKEN" ]; then
 fi
 echo "  Runner 注册成功! Token: ${RUNNER_TOKEN:0:10}..."
 
-# 启动 Runner 容器（host 网络模式）
+# 启动 Runner 容器前，检查是否已有同名容器
+# 避免误删正在运行的容器导致数据丢失
 if docker ps -a --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
     echo "  [WARN] 检测到已存在的 gitlab-runner 容器"
     # 检查容器是否正在运行
@@ -184,6 +211,9 @@ if docker ps -a --format '{{.Names}}' | grep -q '^gitlab-runner$'; then
     echo "  移除已停止的旧容器..."
     docker rm gitlab-runner
 fi
+
+# 使用 host 网络模式启动 Runner 容器
+# host 模式无需端口映射，容器可直接访问宿主机网络
 if ! docker run -d --name gitlab-runner --restart always \
     --network host \
     -v /srv/gitlab-runner/config:/etc/gitlab-runner \
@@ -195,6 +225,7 @@ fi
 echo "  Runner 容器启动完成"
 
 # 在 Runner 容器中安装依赖
+# python3 + requests：AI 代码审查和自愈构建脚本运行所需
 echo "  安装 Runner 容器依赖..."
 if ! docker exec gitlab-runner bash -c "apt-get update -qq && apt-get install -y -qq python3 python3-pip git curl > /dev/null 2>&1"; then
     echo "  [ERROR] Runner 容器依赖安装失败 (apt-get)"
@@ -205,7 +236,8 @@ if ! docker exec gitlab-runner pip3 install --break-system-packages requests; th
     safe_exit 1
 fi
 
-# 配置 Runner
+# 写入 Runner 配置文件
+# 使用 shell 执行器：Job 直接在容器内执行命令，无需额外 Docker-in-Docker
 echo "  配置 Runner..."
 if ! docker exec gitlab-runner bash -c "cat > /etc/gitlab-runner/config.toml << 'TOML'
 concurrent = ${RUNNER_CONCURRENT}
@@ -232,10 +264,14 @@ TOML"; then
     safe_exit 1
 fi
 
-# 配置 git insteadOf（处理 GitLab external_url 与实际访问地址不一致的问题）
+# 配置 git URL 重定向
+# 处理 GitLab external_url 与 Runner 容器内实际访问地址不一致的情况
+# 例如：GitLab 配置的外部地址是 http://gitlab.example.com，
+#       但容器内需要通过 http://192.168.1.100 访问
 GITLAB_HOST=$(echo "$GITLAB_URL" | python3 -c "import sys; from urllib.parse import urlparse; u=urlparse(sys.stdin.read().strip()); print(u.hostname)" 2>/dev/null)
 if [ -n "$GITLAB_HOST" ] && [ "$GITLAB_HOST" != "localhost" ] && [ "$GITLAB_HOST" != "127.0.0.1" ]; then
     docker exec gitlab-runner bash -c "git config --global url.\"${GITLAB_URL}/\".insteadOf \"http://${GITLAB_HOST}/\""
+    # 将 root 用户的 gitconfig 复制给 gitlab-runner 用户
     docker exec gitlab-runner bash -c "cp /root/.gitconfig /home/gitlab-runner/.gitconfig 2>/dev/null; chown gitlab-runner:gitlab-runner /home/gitlab-runner/.gitconfig 2>/dev/null"
     echo "  已配置 git URL 重定向: http://${GITLAB_HOST}/ -> ${GITLAB_URL}/"
 fi
@@ -246,9 +282,11 @@ echo "  Runner 配置完成!"
 echo ""
 echo "[步骤 6/6] 验证部署..."
 
-# 验证 Runner 连接（等待 Runner 初始化）
+# 等待 Runner 完成初始化后再验证连接
 echo "  等待 Runner 初始化..."
 sleep 5
+
+# 验证 Runner 是否能成功连接 GitLab
 VERIFY_RESULT=$(docker exec gitlab-runner gitlab-runner verify 2>&1 || true)
 if echo "$VERIFY_RESULT" | grep -q "is alive"; then
     echo "  Runner 连接验证: 通过"
@@ -257,7 +295,7 @@ else
     echo "  提示: 如果 Runner 无法连接 GitLab，请检查 GITLAB_URL 是否从 Runner 容器内可达"
 fi
 
-# 检查最新 Pipeline
+# 查询项目中已触发的 Pipeline 数量
 PIPELINES=$(curl -s "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/pipelines" \
     -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" 2>/dev/null || echo "[]")
 PIPE_COUNT=$(echo "$PIPELINES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
